@@ -14,6 +14,8 @@
     "@supabase/supabase-js": "^2.99.2",
     "clsx": "^2.1.1",
     "date-fns": "^3.6.0",
+    "discord.js": "^14.25.1",
+    "express": "^5.2.1",
     "jose": "^5.6.3",
     "next": "^14.2.35",
     "oslo": "^1.2.1",
@@ -23,6 +25,7 @@
     "zustand": "^4.5.4"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^20.14.11",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
