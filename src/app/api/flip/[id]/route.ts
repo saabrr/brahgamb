@@ -1,46 +1,33 @@
 // src/app/api/flip/[id]/route.ts
-// POST /api/flip/:id/join  — join someone's flip
-// POST /api/flip/:id/flip  — execute the flip (server-side randomness)
-
-import { NextRequest, NextResponse } from 'next/server'
+import { NextRequest } from 'next/server'
 import { requireAuth, createServiceClient } from '@/lib/supabase'
-import type { ApiResponse } from '@/types'
+import { apiOk, apiErr, handleError } from '@/lib/api'
 
-type Params = { params: { id: string } }
+type Ctx = { params: { id: string } }
 
-// ── POST /api/flip/[id] — join a flip ────────────────────────────────────────
-export async function POST(req: NextRequest, { params }: Params): Promise<NextResponse<ApiResponse>> {
+export async function POST(req: NextRequest, { params }: Ctx) {
   try {
-    const { dbUser } = await requireAuth()
-    const { action, group_verification_id } = await req.json()
+    const dbUser = await requireAuth()
+    const body = await req.json()
+    const { action, group_verification_id } = body
     const flipId = params.id
 
     const service = createServiceClient()
 
-    // Fetch the flip
-    const { data: flip, error: flipErr } = await service
+    const { data: flip, error: fetchErr } = await service
       .from('flips')
       .select('*')
       .eq('id', flipId)
       .single()
 
-    if (flipErr || !flip) {
-      return NextResponse.json({ error: 'Flip not found' }, { status: 404 })
-    }
+    if (fetchErr || !flip) return apiErr('Flip not found', 404)
 
-    // ── JOIN ─────────────────────────────────────────────────────────────────
     if (action === 'join') {
-      if (flip.status !== 'open') {
-        return NextResponse.json({ error: 'This flip is no longer open' }, { status: 400 })
-      }
-      if (flip.creator_id === dbUser.id) {
-        return NextResponse.json({ error: 'You cannot join your own flip' }, { status: 400 })
-      }
-      if (!group_verification_id) {
-        return NextResponse.json({ error: 'You must provide a verified group to challenge with' }, { status: 400 })
-      }
+      if (flip.status !== 'open') return apiErr('Flip is no longer open')
+      if (flip.creator_id === dbUser.id) return apiErr('Cannot join your own flip')
+      if (!group_verification_id) return apiErr('Must provide a verified group')
 
-      // Verify challenger's group
+      // Verify challenger group
       const { data: group } = await service
         .from('group_verifications')
         .select('id')
@@ -49,76 +36,57 @@ export async function POST(req: NextRequest, { params }: Params): Promise<NextRe
         .eq('status', 'approved')
         .single()
 
-      if (!group) {
-        return NextResponse.json({ error: 'Your group is not verified' }, { status: 400 })
-      }
+      if (!group) return apiErr('Your group is not verified')
 
-      // Set challenger and move to active
-      const { error: joinErr } = await service
+      // Join and mark active
+      await service
         .from('flips')
         .update({
-          challenger_id:        dbUser.id,
-          challenger_group_id:  group_verification_id,
-          status:               'active',
+          challenger_id:       dbUser.id,
+          challenger_group_id: group_verification_id,
+          status:              'active',
         })
         .eq('id', flipId)
-        .eq('status', 'open') // optimistic lock
+        .eq('status', 'open')
 
-      if (joinErr) {
-        return NextResponse.json({ error: 'Failed to join — flip may have been taken' }, { status: 409 })
-      }
-
-      // Auto-execute the flip now that both players are in
-      return executeFlip(flipId, service)
+      // Execute flip server-side
+      return await resolveFlip(flipId, service)
     }
 
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 })
-
-  } catch (err: any) {
-    if (err.message === 'Unauthorized') return NextResponse.json({ error: 'Not logged in' }, { status: 401 })
-    console.error('flip action error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    return apiErr('Invalid action')
+  } catch (e) {
+    return handleError(e)
   }
 }
 
-// ── Core flip logic — server-side only ───────────────────────────────────────
-async function executeFlip(flipId: string, service: ReturnType<typeof createServiceClient>) {
+async function resolveFlip(flipId: string, service: ReturnType<typeof createServiceClient>) {
   const { data: flip } = await service
     .from('flips')
     .select('*')
     .eq('id', flipId)
     .single()
 
-  if (!flip || flip.status !== 'active') {
-    return NextResponse.json({ error: 'Flip is not in active state' }, { status: 400 })
-  }
+  if (!flip || flip.status !== 'active') return apiErr('Flip not in active state')
+  if (!flip.challenger_id) return apiErr('No challenger')
 
-  // True server-side randomness — never exposed to client before commit
-  const result: 'heads' | 'tails' = crypto.getRandomValues(new Uint8Array(1))[0] % 2 === 0
-    ? 'heads'
-    : 'tails'
+  // Pure server-side randomness
+  const rand = new Uint8Array(1)
+  crypto.getRandomValues(rand)
+  const result: 'heads' | 'tails' = rand[0] % 2 === 0 ? 'heads' : 'tails'
 
   const winnerId = result === flip.creator_side ? flip.creator_id : flip.challenger_id
   const loserId  = winnerId === flip.creator_id ? flip.challenger_id : flip.creator_id
 
-  if (!winnerId || !loserId) {
-    return NextResponse.json({ error: 'Missing player IDs' }, { status: 500 })
-  }
-
-  // Atomic DB function — updates flip, wins, losses in one transaction
-  const { error } = await service.rpc('resolve_flip', {
+  // Atomic resolve via DB function
+  const { error: rpcErr } = await service.rpc('resolve_flip', {
     p_flip_id:     flipId,
     p_result_side: result,
     p_winner_id:   winnerId,
     p_loser_id:    loserId,
   })
+  if (rpcErr) return apiErr('Failed to resolve flip', 500)
 
-  if (error) {
-    console.error('resolve_flip RPC error:', error)
-    return NextResponse.json({ error: 'Failed to resolve flip' }, { status: 500 })
-  }
-
-  // Create transfer record — loser owes winner their group
+  // Log the transfer
   const loserGroupId = loserId === flip.creator_id
     ? flip.creator_group_id
     : flip.challenger_group_id
@@ -139,16 +107,13 @@ async function executeFlip(flipId: string, service: ReturnType<typeof createServ
     })
   }
 
-  // Notify Discord bot if a milestone was crossed
-  await notifyDiscordMilestone(winnerId, service)
+  // Notify Discord bot if milestone hit (non-fatal)
+  await notifyDiscord(winnerId, service).catch(() => {})
 
-  return NextResponse.json({
-    data: { result, winner_id: winnerId, flip_id: flipId }
-  })
+  return apiOk({ result, winner_id: winnerId, flip_id: flipId })
 }
 
-// ── Discord milestone check ───────────────────────────────────────────────────
-async function notifyDiscordMilestone(userId: string, service: ReturnType<typeof createServiceClient>) {
+async function notifyDiscord(userId: string, service: ReturnType<typeof createServiceClient>) {
   const { data: user } = await service
     .from('users')
     .select('wins, discord_id, rank')
@@ -156,26 +121,19 @@ async function notifyDiscordMilestone(userId: string, service: ReturnType<typeof
     .single()
 
   if (!user?.discord_id) return
-
-  const milestones: Record<number, string> = { 25: 'Whale', 100: 'God' }
-  const newRole = milestones[user.wins]
-
-  if (!newRole) return
-
-  // Only assign if not already a higher rank
   if (['staff', 'manager', 'owner'].includes(user.rank)) return
 
-  try {
-    await fetch(`${process.env.DISCORD_BOT_WEBHOOK_URL}/assign-role`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-webhook-secret': process.env.DISCORD_WEBHOOK_SECRET!,
-      },
-      body: JSON.stringify({ discord_id: user.discord_id, role_name: newRole }),
-    })
-  } catch (err) {
-    console.error('Discord milestone notify failed:', err)
-    // Non-fatal — game still resolved correctly
-  }
+  const milestones: Record<number, string> = { 25: 'Whale', 100: 'God' }
+  const role = milestones[user.wins]
+  if (!role) return
+
+  const botUrl = process.env.DISCORD_BOT_WEBHOOK_URL
+  const secret = process.env.DISCORD_WEBHOOK_SECRET
+  if (!botUrl || !secret) return
+
+  await fetch(`${botUrl}/assign-role`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-webhook-secret': secret },
+    body: JSON.stringify({ discord_id: user.discord_id, role_name: role }),
+  })
 }

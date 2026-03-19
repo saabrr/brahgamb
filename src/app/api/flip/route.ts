@@ -1,68 +1,66 @@
 // src/app/api/flip/route.ts
-// GET  — list open flips
-// POST — create a new flip
-
 import { NextRequest, NextResponse } from 'next/server'
 import { requireAuth, createServiceClient, createServerSupabase } from '@/lib/supabase'
-import type { ApiResponse, Flip } from '@/types'
+import { apiOk, apiErr, handleError } from '@/lib/api'
 
-// ── GET /api/flip — list open flips ──────────────────────────────────────────
+const FLIP_SELECT = `
+  *,
+  creator:users!flips_creator_id_fkey(id,username,avatar_url,rank,wins,losses),
+  challenger:users!flips_challenger_id_fkey(id,username,avatar_url,rank,wins,losses),
+  creator_group:group_verifications!flips_creator_group_id_fkey(id,group_name,member_count,roblox_group_id),
+  challenger_group:group_verifications!flips_challenger_group_id_fkey(id,group_name,member_count,roblox_group_id)
+`
+
+// GET — list open flips
 export async function GET() {
-  const supabase = await createServerSupabase()
+  try {
+    const supabase = await createServerSupabase()
+    const { data, error } = await supabase
+      .from('flips')
+      .select(FLIP_SELECT)
+      .eq('status', 'open')
+      .order('created_at', { ascending: false })
+      .limit(50)
 
-  const { data, error } = await supabase
-    .from('flips')
-    .select(`
-      *,
-      creator:users!flips_creator_id_fkey(id, username, avatar_url, rank, wins),
-      challenger:users!flips_challenger_id_fkey(id, username, avatar_url, rank, wins),
-      creator_group:group_verifications!flips_creator_group_id_fkey(id, group_name, member_count, roblox_group_id),
-      challenger_group:group_verifications!flips_challenger_group_id_fkey(id, group_name, member_count, roblox_group_id)
-    `)
-    .eq('status', 'open')
-    .order('created_at', { ascending: false })
-    .limit(50)
-
-  if (error) return NextResponse.json({ error: error.message }, { status: 500 })
-  return NextResponse.json({ data })
+    if (error) return apiErr(error.message, 500)
+    return apiOk(data)
+  } catch (e) {
+    return handleError(e)
+  }
 }
 
-// ── POST /api/flip — create a flip ───────────────────────────────────────────
-export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<Flip>>> {
+// POST — create a flip
+export async function POST(req: NextRequest) {
   try {
-    const { dbUser } = await requireAuth()
-    const { group_verification_id, side } = await req.json()
+    const dbUser = await requireAuth()
+    const body = await req.json()
+    const { group_verification_id, side } = body
 
-    if (!group_verification_id || !['heads', 'tails'].includes(side)) {
-      return NextResponse.json({ error: 'Missing group_verification_id or invalid side' }, { status: 400 })
-    }
+    if (!group_verification_id) return apiErr('Missing group_verification_id')
+    if (!['heads', 'tails'].includes(side)) return apiErr('Invalid side')
 
     const service = createServiceClient()
 
-    // Confirm the group is approved and belongs to this user
+    // Verify group is approved and belongs to this user
     const { data: group, error: groupErr } = await service
       .from('group_verifications')
-      .select('id, status, user_id')
+      .select('id')
       .eq('id', group_verification_id)
       .eq('user_id', dbUser.id)
       .eq('status', 'approved')
       .single()
 
-    if (groupErr || !group) {
-      return NextResponse.json({ error: 'Group not found or not verified' }, { status: 400 })
-    }
+    if (groupErr || !group) return apiErr('Group not found or not verified')
 
-    // Check the group isn't already in an active/open flip
-    const { data: activeFlip } = await service
+    // Check group isn't already in an active flip
+    const { data: inUse } = await service
       .from('flips')
       .select('id')
       .eq('creator_group_id', group_verification_id)
       .in('status', ['open', 'active'])
       .maybeSingle()
 
-    if (activeFlip) {
-      return NextResponse.json({ error: 'This group is already in an active flip' }, { status: 400 })
-    }
+    if (inUse) return apiErr('This group is already in an active flip')
 
     const { data: flip, error: flipErr } = await service
       .from('flips')
@@ -70,22 +68,13 @@ export async function POST(req: NextRequest): Promise<NextResponse<ApiResponse<F
         creator_id:       dbUser.id,
         creator_group_id: group_verification_id,
         creator_side:     side,
-        status:           'open',
       })
-      .select(`
-        *,
-        creator:users!flips_creator_id_fkey(id, username, avatar_url, rank, wins),
-        creator_group:group_verifications!flips_creator_group_id_fkey(id, group_name, member_count)
-      `)
+      .select(FLIP_SELECT)
       .single()
 
-    if (flipErr || !flip) throw flipErr
-
-    return NextResponse.json({ data: flip })
-
-  } catch (err: any) {
-    if (err.message === 'Unauthorized') return NextResponse.json({ error: 'Not logged in' }, { status: 401 })
-    console.error('flip create error:', err)
-    return NextResponse.json({ error: 'Internal server error' }, { status: 500 })
+    if (flipErr || !flip) return apiErr(flipErr?.message ?? 'Failed to create flip', 500)
+    return apiOk(flip, 201)
+  } catch (e) {
+    return handleError(e)
   }
 }

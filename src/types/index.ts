@@ -1,5 +1,4 @@
 // src/types/index.ts
-// Single source of truth for all TypeScript types across GroupFlip
 
 export type UserRank = 'user' | 'whale' | 'god' | 'staff' | 'manager' | 'owner'
 export type VerificationStatus = 'pending' | 'approved' | 'rejected'
@@ -37,7 +36,6 @@ export interface GroupVerification {
   reject_reason: string | null
   created_at: string
   updated_at: string
-  // joined
   user?: User
   reviewer?: User
 }
@@ -55,12 +53,10 @@ export interface Flip {
   flipped_at: string | null
   created_at: string
   updated_at: string
-  // joined
   creator?: User
   challenger?: User
   creator_group?: GroupVerification
   challenger_group?: GroupVerification
-  winner?: User
 }
 
 export interface RouletteRound {
@@ -71,7 +67,6 @@ export interface RouletteRound {
   result: RouletteColor | null
   winner_ids: string[] | null
   created_at: string
-  // joined
   bets?: RouletteBet[]
 }
 
@@ -83,7 +78,6 @@ export interface RouletteBet {
   color: RouletteColor
   won: boolean | null
   created_at: string
-  // joined
   user?: User
   group?: GroupVerification
 }
@@ -94,7 +88,6 @@ export interface ChatMessage {
   message: string
   is_deleted: boolean
   created_at: string
-  // joined
   user?: User
 }
 
@@ -110,50 +103,24 @@ export interface GroupTransfer {
   disputed: boolean
   dispute_note: string | null
   created_at: string
-  // joined
   from_user?: User
   to_user?: User
 }
 
-export interface AdminLog {
-  id: string
-  admin_id: string
-  action: string
-  target_id: string | null
-  target_type: string | null
-  note: string | null
-  created_at: string
-  admin?: User
+// API response wrapper
+export interface ApiOk<T = null> {
+  ok: true
+  data: T
 }
-
-// ── API response shapes ───────────────────────────────────────────────────────
-export interface ApiResponse<T = void> {
-  data?: T
-  error?: string
+export interface ApiErr {
+  ok: false
+  error: string
 }
+export type ApiResult<T = null> = ApiOk<T> | ApiErr
 
-export interface RolimonGroupData {
-  group_id: number
-  name: string
-  member_count: number
-  owner_id: number
-  owner_updated: number // unix timestamp
+export function ok<T>(data: T): ApiOk<T> {
+  return { ok: true, data }
 }
-
-// ── Realtime payload shapes ───────────────────────────────────────────────────
-export interface RealtimeFlipPayload {
-  new: Flip
-  old: Partial<Flip>
-  eventType: 'INSERT' | 'UPDATE' | 'DELETE'
-}
-
-export interface RealtimeChatPayload {
-  new: ChatMessage
-  eventType: 'INSERT'
-}
-
-export interface RealtimeRoundPayload {
-  new: RouletteRound
-  old: Partial<RouletteRound>
-  eventType: 'INSERT' | 'UPDATE'
+export function err(error: string): ApiErr {
+  return { ok: false, error }
 }
